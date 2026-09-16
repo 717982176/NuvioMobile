@@ -83,6 +83,7 @@
 ---
 
 ## Phase 2: Chinese Metadata Enrichment (TMDB zh-CN Integration)
+- **Status:** `IN PROGRESS`
 - **Files/Modules:**
   - `composeApp/src/commonMain/kotlin/com/nuvio/app/features/tmdb/TmdbMetadataService.kt`
   - `composeApp/src/commonMain/kotlin/com/nuvio/app/features/tmdb/TmdbImages.kt`

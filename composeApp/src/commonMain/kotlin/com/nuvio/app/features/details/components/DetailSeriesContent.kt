@@ -207,7 +207,7 @@ fun DetailSeriesContent(
                             title = if (meta.type != "series" && seasonForContent <= 0) {
                                 stringResource(Res.string.details_videos)
                             } else {
-                                seasonForContent.label()
+                                seasonForContent.label(meta.seasonNames)
                             },
                         )
                     }
@@ -298,7 +298,7 @@ internal fun DetailSeriesListHeader(
                     title = if (meta.type != "series" && currentSeason <= 0) {
                         stringResource(Res.string.details_videos)
                     } else {
-                        currentSeason.label()
+                        currentSeason.label(meta.seasonNames)
                     },
                 )
             }
@@ -421,6 +421,7 @@ private fun SeriesSeasonSelector(
                         currentSeason = currentSeason,
                         sizing = sizing,
                         horizontalScrollPadding = horizontalScrollPadding,
+                        seasonNames = meta.seasonNames,
                         onSelect = onSelect,
                         onLongPress = onLongPress,
                     )
@@ -432,6 +433,7 @@ private fun SeriesSeasonSelector(
                 currentSeason = currentSeason,
                 sizing = sizing,
                 horizontalScrollPadding = horizontalScrollPadding,
+                seasonNames = meta.seasonNames,
                 onSelect = onSelect,
                 onLongPress = onLongPress,
             )
@@ -481,6 +483,7 @@ private fun SeasonTextChipScrollRow(
     currentSeason: Int,
     sizing: SeriesContentSizing,
     horizontalScrollPadding: Dp,
+    seasonNames: Map<Int, String> = emptyMap(),
     onSelect: (Int) -> Unit,
     onLongPress: ((Int) -> Unit)?,
 ) {
@@ -530,7 +533,7 @@ private fun SeasonTextChipScrollRow(
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = season.label(),
+                    text = season.label(seasonNames),
                     style = MaterialTheme.typography.bodyLarge.copy(
                         fontSize = sizing.seasonChipTextSize,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
@@ -582,7 +585,7 @@ private fun SeasonPosterScrollRow(
     ) {
         items(seasons, key = { season -> season }) { season ->
             SeasonPosterButton(
-                label = season.label(),
+                label = season.label(meta.seasonNames),
                 imageUrl = resolveSeasonPoster(
                     season = season,
                     groupedEpisodes = groupedEpisodes,
@@ -1468,12 +1471,13 @@ private fun seriesContentSizing(maxWidthDp: Float): SeriesContentSizing =
         )
     }
 
-private fun Int.label(): String =
-    if (this <= 0) {
-        runBlocking { getString(Res.string.episodes_specials) }
-    } else {
-        runBlocking { getString(Res.string.episodes_season, this@label) }
-    }
+private fun Int.label(seasonNames: Map<Int, String> = emptyMap()): String =
+    seasonNames[this]?.takeIf { it.isNotBlank() }
+        ?: if (this <= 0) {
+            runBlocking { getString(Res.string.episodes_specials) }
+        } else {
+            runBlocking { getString(Res.string.episodes_season, this@label) }
+        }
 
 private fun MetaVideo.episodeBadge(): String =
     when {

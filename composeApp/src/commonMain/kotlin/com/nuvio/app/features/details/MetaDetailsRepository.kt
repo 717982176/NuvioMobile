@@ -47,9 +47,14 @@ object MetaDetailsRepository {
     private var activeRequestKey: String? = null
     private val cachedMetaByRequestKey = mutableMapOf<String, CachedMetaEntry>()
 
+    private fun buildRequestKey(type: String, id: String): String {
+        val tmdbLanguage = TmdbSettingsRepository.snapshot().language
+        return buildMetadataRequestKey(type = type, id = id, tmdbLanguage = tmdbLanguage)
+    }
+
     fun load(type: String, id: String) {
         log.d { "load() called — type=$type id=$id" }
-        val requestKey = "$type:$id"
+        val requestKey = buildRequestKey(type, id)
         val currentState = _uiState.value
         val mdbListSettings = MdbListSettingsRepository.snapshot()
         val metaScreenSettingsFingerprint = buildMetaScreenSettingsFingerprint(mdbListSettings)
@@ -176,7 +181,7 @@ object MetaDetailsRepository {
     }
 
     fun peek(type: String, id: String): MetaDetails? {
-        val requestKey = "$type:$id"
+        val requestKey = buildRequestKey(type, id)
         val currentMeta = _uiState.value.meta?.takeIf { it.type == type && it.id == id }
         if (currentMeta != null) return currentMeta
 
@@ -194,7 +199,7 @@ object MetaDetailsRepository {
     }
 
     suspend fun fetch(type: String, id: String, cacheResult: Boolean = true): MetaDetails? {
-        val requestKey = "$type:$id"
+        val requestKey = buildRequestKey(type, id)
         cachedMetaByRequestKey[requestKey]?.let { return it.baseMeta }
 
         val metaLookupId = resolveMetaLookupId(itemId = id, itemType = type)
@@ -554,3 +559,9 @@ object MetaDetailsRepository {
         return emptyList()
     }
 }
+
+internal fun buildMetadataRequestKey(
+    type: String,
+    id: String,
+    tmdbLanguage: String,
+): String = "$type:$id:${com.nuvio.app.features.tmdb.normalizeTmdbLanguage(tmdbLanguage)}"

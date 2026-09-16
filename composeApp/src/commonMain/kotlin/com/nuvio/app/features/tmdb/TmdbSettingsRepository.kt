@@ -1,7 +1,10 @@
 package com.nuvio.app.features.tmdb
 
+import androidx.compose.ui.text.intl.Locale
 import com.nuvio.app.features.details.MetaDetailsRepository
 import com.nuvio.app.features.profiles.ProfileRepository
+import com.nuvio.app.features.settings.AppLanguage
+import com.nuvio.app.features.settings.ThemeSettingsRepository
 import com.nuvio.app.features.watchprogress.ContinueWatchingEnrichmentCache
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -66,10 +69,34 @@ object TmdbSettingsRepository {
     fun setLanguage(value: String) {
         ensureLoaded()
         val normalized = normalizeLanguage(value)
-        if (language == normalized) return
+        if (normalized.isBlank()) {
+            TmdbSettingsStorage.saveLanguage("")
+            val defaultLang = defaultTmdbLanguage()
+            if (language != defaultLang) {
+                language = defaultLang
+                publish()
+                invalidateMetadata()
+            }
+            return
+        }
+        if (language == normalized && TmdbSettingsStorage.loadLanguage() == normalized) return
         language = normalized
         publish()
         TmdbSettingsStorage.saveLanguage(normalized)
+        invalidateMetadata()
+    }
+
+    fun onAppLanguageChanged(appLanguage: AppLanguage) {
+        ensureLoaded()
+        val userSavedLanguage = TmdbSettingsStorage.loadLanguage()
+        if (shouldUpdateTmdbLanguageOnAppLanguageChange(userSavedLanguage)) {
+            val nextLanguage = defaultTmdbLanguage(appLanguage)
+            if (language != nextLanguage) {
+                language = nextLanguage
+                publish()
+                invalidateMetadata()
+            }
+        }
     }
 
     fun setUseTrailers(value: Boolean) = setBoolean(
@@ -175,11 +202,16 @@ object TmdbSettingsRepository {
         val wasLoaded = hasLoaded
         val previousApiKey = apiKey
         val previousUseReleaseDates = useReleaseDates
+        val previousLanguage = language
         hasLoaded = true
         enabled = TmdbSettingsStorage.loadEnabled() ?: false
         apiKey = TmdbSettingsStorage.loadApiKey()?.trim().orEmpty()
         val storedLanguage = TmdbSettingsStorage.loadLanguage()
-        language = if (storedLanguage == null) "en" else normalizeLanguage(storedLanguage)
+        language = if (storedLanguage.isNullOrBlank()) {
+            defaultTmdbLanguage()
+        } else {
+            normalizeLanguage(storedLanguage)
+        }
         useTrailers = TmdbSettingsStorage.loadUseTrailers() ?: true
         useArtwork = TmdbSettingsStorage.loadUseArtwork() ?: true
         useBasicInfo = TmdbSettingsStorage.loadUseBasicInfo() ?: true
@@ -193,7 +225,7 @@ object TmdbSettingsRepository {
         useMoreLikeThis = TmdbSettingsStorage.loadUseMoreLikeThis() ?: true
         useCollections = TmdbSettingsStorage.loadUseCollections() ?: true
         publish()
-        if (wasLoaded && (previousApiKey != apiKey || previousUseReleaseDates != useReleaseDates)) {
+        if (wasLoaded && (previousApiKey != apiKey || previousUseReleaseDates != useReleaseDates || previousLanguage != language)) {
             invalidateMetadata()
         }
     }
@@ -219,9 +251,33 @@ object TmdbSettingsRepository {
     }
 
     private fun invalidateMetadata() {
+        TmdbMetadataService.clearCaches()
         MetaDetailsRepository.clear()
         ContinueWatchingEnrichmentCache.clearAll(ProfileRepository.activeProfileId)
     }
+}
+
+internal fun shouldUpdateTmdbLanguageOnAppLanguageChange(userExplicitLanguage: String?): Boolean =
+    userExplicitLanguage.isNullOrBlank()
+
+internal fun defaultTmdbLanguage(
+    appLanguage: AppLanguage = ThemeSettingsRepository.selectedAppLanguage.value,
+    deviceLanguageTag: String? = null,
+): String = when (appLanguage) {
+    AppLanguage.CHINESE_SIMPLIFIED -> "zh-CN"
+    AppLanguage.CHINESE_TRADITIONAL -> "zh-TW"
+    AppLanguage.DEVICE -> {
+        val tag = deviceLanguageTag
+            ?: runCatching { Locale.current.toLanguageTag() }.getOrNull().orEmpty()
+        when {
+            tag.startsWith("zh-TW", ignoreCase = true) ||
+                tag.startsWith("zh-Hant", ignoreCase = true) ||
+                tag.startsWith("zh-HK", ignoreCase = true) -> "zh-TW"
+            tag.startsWith("zh", ignoreCase = true) -> "zh-CN"
+            else -> "en"
+        }
+    }
+    else -> "en"
 }
 
 internal fun normalizeLanguage(value: String?): String {

@@ -11,10 +11,13 @@ import com.nuvio.app.features.details.MoreLikeThisSource
 import com.nuvio.app.features.details.PersonDetail
 import com.nuvio.app.features.home.MetaPreview
 import com.nuvio.app.features.home.PosterShape
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -43,6 +46,34 @@ object TmdbMetadataService {
     private val backdropCache = linkedMapOf<String, String?>()
     private val backdropCacheMutex = Mutex()
     private val backdropRequests = Semaphore(4)
+    private val cacheMaintenanceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    internal var httpFetcherOverride: (suspend (endpoint: String, query: Map<String, String>) -> String)? = null
+
+    fun clearCaches() {
+        enrichmentCache.clear()
+        episodeCache.clear()
+        moreLikeThisCache.clear()
+        collectionCache.clear()
+        trailerCache.clear()
+        personCache.clear()
+        entityBrowseCache.clear()
+        entityHeaderCache.clear()
+        entityRailCache.clear()
+        if (backdropCacheMutex.tryLock()) {
+            try {
+                backdropCache.clear()
+            } finally {
+                backdropCacheMutex.unlock()
+            }
+        } else {
+            cacheMaintenanceScope.launch {
+                backdropCacheMutex.withLock {
+                    backdropCache.clear()
+                }
+            }
+        }
+    }
 
     suspend fun fetchLocalizedBackdrop(id: String, type: String, language: String): String? =
         withContext(Dispatchers.Default) {
@@ -51,7 +82,7 @@ object TmdbMetadataService {
             val normalizedLanguage = normalizeTmdbLanguage(language)
             backdropRequests.withPermit {
                 val tmdbId = TmdbService.ensureTmdbId(id, mediaType) ?: return@withPermit null
-                val cacheKey = "$tmdbId:$mediaType:$normalizedLanguage"
+                val cacheKey = buildBackdropCacheKey(tmdbId, mediaType, normalizedLanguage)
                 backdropCacheMutex.withLock {
                     if (backdropCache.containsKey(cacheKey)) return@withPermit backdropCache[cacheKey]
                 }
@@ -78,7 +109,7 @@ object TmdbMetadataService {
         val settings = TmdbSettingsRepository.snapshot()
         if (!settings.enabled) return@withContext null
         val language = normalizeTmdbLanguage(settings.language)
-        val cacheKey = "$personId:${preferCrewCredits?.toString() ?: "auto"}:$language"
+        val cacheKey = buildPersonCacheKey(personId, preferCrewCredits, language)
         personCache[cacheKey]?.let { return@withContext it }
 
         try {
@@ -103,7 +134,59 @@ object TmdbMetadataService {
             val isCjkLanguage = language.startsWith("ja") ||
                 language.startsWith("ko") ||
                 language.startsWith("zh")
+            val isChinese = isChineseLanguage(language)
+
+            val (zhPerson, zhCredits) = if (isChinese && language != "zh") {
+                val needZhPerson = person.biography.isNullOrBlank()
+                val needZhCredits = (credits?.cast.orEmpty() + credits?.crew.orEmpty()).any {
+                    val orig = it.originalTitle ?: it.originalName
+                    val curr = it.title ?: it.name
+                    curr != null && orig != null && curr.equals(orig, ignoreCase = true)
+                }
+                if (needZhPerson || needZhCredits) {
+                    coroutineScope {
+                        val zhPersonDeferred = if (needZhPerson) async {
+                            runCatching {
+                                fetch<TmdbPersonResponse>(
+                                    endpoint = "person/$personId",
+                                    query = mapOf("language" to "zh"),
+                                )
+                            }.getOrNull()
+                        } else null
+
+                        val zhCreditsDeferred = if (needZhCredits) async {
+                            runCatching {
+                                fetch<TmdbPersonCombinedCreditsResponse>(
+                                    endpoint = "person/$personId/combined_credits",
+                                    query = mapOf("language" to "zh"),
+                                )
+                            }.getOrNull()
+                        } else null
+
+                        (zhPersonDeferred?.await()) to (zhCreditsDeferred?.await())
+                    }
+                } else {
+                    null to null
+                }
+            } else {
+                null to null
+            }
+
+            val zhTitlesById = buildMap<Int, String> {
+                zhCredits?.cast.orEmpty().forEach { c ->
+                    val orig = c.originalTitle ?: c.originalName
+                    val t = (c.title ?: c.name)?.trim()?.takeIf { it.isNotBlank() && (orig == null || !it.equals(orig, ignoreCase = true)) }
+                    if (t != null) put(c.id, t)
+                }
+                zhCredits?.crew.orEmpty().forEach { c ->
+                    val orig = c.originalTitle ?: c.originalName
+                    val t = (c.title ?: c.name)?.trim()?.takeIf { it.isNotBlank() && (orig == null || !it.equals(orig, ignoreCase = true)) }
+                    if (t != null) put(c.id, t)
+                }
+            }
+
             val shouldFetchEnglishPerson = language != "en" &&
+                !isChinese &&
                 (
                     person.biography.isNullOrBlank() ||
                         (
@@ -150,7 +233,11 @@ object TmdbMetadataService {
             }
             val englishTitlesById = englishCreditTitlesById(englishCredits)
 
-            val biography = if (person.biography.isNullOrBlank() && language != "en") {
+            val biography = if (isChinese) {
+                person.biography?.trim()?.takeIf(String::isNotBlank)
+                    ?: zhPerson?.biography?.trim()?.takeIf(String::isNotBlank)
+                    ?: englishPerson?.biography?.trim()?.takeIf(String::isNotBlank)
+            } else if (person.biography.isNullOrBlank() && language != "en") {
                 englishPerson?.biography
             } else {
                 person.biography
@@ -164,6 +251,7 @@ object TmdbMetadataService {
                         cast = credits?.cast.orEmpty(),
                         preferredLanguage = language,
                         englishTitlesById = englishTitlesById,
+                        zhTitlesById = zhTitlesById,
                     )
                 }
                 val crewMovieDeferred = async {
@@ -171,6 +259,7 @@ object TmdbMetadataService {
                         crew = credits?.crew.orEmpty(),
                         preferredLanguage = language,
                         englishTitlesById = englishTitlesById,
+                        zhTitlesById = zhTitlesById,
                     )
                 }
                 val castTvDeferred = async {
@@ -178,6 +267,7 @@ object TmdbMetadataService {
                         cast = credits?.cast.orEmpty(),
                         preferredLanguage = language,
                         englishTitlesById = englishTitlesById,
+                        zhTitlesById = zhTitlesById,
                     )
                 }
                 val crewTvDeferred = async {
@@ -185,6 +275,7 @@ object TmdbMetadataService {
                         crew = credits?.crew.orEmpty(),
                         preferredLanguage = language,
                         englishTitlesById = englishTitlesById,
+                        zhTitlesById = zhTitlesById,
                     )
                 }
                 PersonCreditBuckets(
@@ -254,15 +345,28 @@ object TmdbMetadataService {
         cast: List<TmdbPersonCreditCast>,
         preferredLanguage: String,
         englishTitlesById: Map<Int, String>,
+        zhTitlesById: Map<Int, String> = emptyMap(),
     ): List<MetaPreview> {
         val seen = mutableSetOf<Int>()
+        val isChinese = isChineseLanguage(preferredLanguage)
         return cast
             .filter { it.mediaType == "movie" && (it.posterPath != null || it.backdropPath != null) }
             .sortedByDescending { it.voteAverage ?: 0.0 }
             .mapNotNull { credit ->
                 if (!seen.add(credit.id)) return@mapNotNull null
+                val orig = credit.originalTitle ?: credit.originalName
+                val curr = credit.title ?: credit.name
+                val localized = if (isChinese) {
+                    if (curr != null && (orig == null || !curr.equals(orig, ignoreCase = true))) {
+                        curr
+                    } else {
+                        zhTitlesById[credit.id] ?: curr
+                    }
+                } else {
+                    curr
+                }
                 val title = resolvePersonName(
-                    localizedName = credit.title ?: credit.name,
+                    localizedName = localized,
                     originalName = credit.originalTitle ?: credit.originalName,
                     fallbackEnglishName = englishTitlesById[credit.id],
                     preferredLanguage = preferredLanguage,
@@ -289,15 +393,28 @@ object TmdbMetadataService {
         crew: List<TmdbPersonCreditCrew>,
         preferredLanguage: String,
         englishTitlesById: Map<Int, String>,
+        zhTitlesById: Map<Int, String> = emptyMap(),
     ): List<MetaPreview> {
         val seen = mutableSetOf<Int>()
+        val isChinese = isChineseLanguage(preferredLanguage)
         return crew
             .filter { it.mediaType == "movie" && (it.posterPath != null || it.backdropPath != null) }
             .sortedByDescending { it.voteAverage ?: 0.0 }
             .mapNotNull { credit ->
                 if (!seen.add(credit.id)) return@mapNotNull null
+                val orig = credit.originalTitle ?: credit.originalName
+                val curr = credit.title ?: credit.name
+                val localized = if (isChinese) {
+                    if (curr != null && (orig == null || !curr.equals(orig, ignoreCase = true))) {
+                        curr
+                    } else {
+                        zhTitlesById[credit.id] ?: curr
+                    }
+                } else {
+                    curr
+                }
                 val title = resolvePersonName(
-                    localizedName = credit.title ?: credit.name,
+                    localizedName = localized,
                     originalName = credit.originalTitle ?: credit.originalName,
                     fallbackEnglishName = englishTitlesById[credit.id],
                     preferredLanguage = preferredLanguage,
@@ -324,15 +441,28 @@ object TmdbMetadataService {
         cast: List<TmdbPersonCreditCast>,
         preferredLanguage: String,
         englishTitlesById: Map<Int, String>,
+        zhTitlesById: Map<Int, String> = emptyMap(),
     ): List<MetaPreview> {
         val seen = mutableSetOf<Int>()
+        val isChinese = isChineseLanguage(preferredLanguage)
         return cast
             .filter { it.mediaType == "tv" && (it.posterPath != null || it.backdropPath != null) }
             .sortedByDescending { it.voteAverage ?: 0.0 }
             .mapNotNull { credit ->
                 if (!seen.add(credit.id)) return@mapNotNull null
+                val orig = credit.originalName ?: credit.originalTitle
+                val curr = credit.name ?: credit.title
+                val localized = if (isChinese) {
+                    if (curr != null && (orig == null || !curr.equals(orig, ignoreCase = true))) {
+                        curr
+                    } else {
+                        zhTitlesById[credit.id] ?: curr
+                    }
+                } else {
+                    curr
+                }
                 val title = resolvePersonName(
-                    localizedName = credit.name ?: credit.title,
+                    localizedName = localized,
                     originalName = credit.originalName ?: credit.originalTitle,
                     fallbackEnglishName = englishTitlesById[credit.id],
                     preferredLanguage = preferredLanguage,
@@ -359,15 +489,28 @@ object TmdbMetadataService {
         crew: List<TmdbPersonCreditCrew>,
         preferredLanguage: String,
         englishTitlesById: Map<Int, String>,
+        zhTitlesById: Map<Int, String> = emptyMap(),
     ): List<MetaPreview> {
         val seen = mutableSetOf<Int>()
+        val isChinese = isChineseLanguage(preferredLanguage)
         return crew
             .filter { it.mediaType == "tv" && (it.posterPath != null || it.backdropPath != null) }
             .sortedByDescending { it.voteAverage ?: 0.0 }
             .mapNotNull { credit ->
                 if (!seen.add(credit.id)) return@mapNotNull null
+                val orig = credit.originalName ?: credit.originalTitle
+                val curr = credit.name ?: credit.title
+                val localized = if (isChinese) {
+                    if (curr != null && (orig == null || !curr.equals(orig, ignoreCase = true))) {
+                        curr
+                    } else {
+                        zhTitlesById[credit.id] ?: curr
+                    }
+                } else {
+                    curr
+                }
                 val title = resolvePersonName(
-                    localizedName = credit.name ?: credit.title,
+                    localizedName = localized,
                     originalName = credit.originalName ?: credit.originalTitle,
                     fallbackEnglishName = englishTitlesById[credit.id],
                     preferredLanguage = preferredLanguage,
@@ -749,6 +892,7 @@ object TmdbMetadataService {
             id = id,
             tmdbId = tmdbId,
             enrichment = enrichment,
+            language = settings.language,
         )
     }
 
@@ -757,14 +901,44 @@ object TmdbMetadataService {
         id: String,
         tmdbId: Int,
         enrichment: TmdbEnrichment,
-    ): MetaDetails =
-        MetaDetails(
+        language: String = "en",
+    ): MetaDetails {
+        val isChinese = isChineseLanguage(language)
+        val resolvedName = resolveLocalizedTitle(
+            targetTitle = enrichment.localizedTitle,
+            zhTitle = enrichment.genericZhTitle,
+            originalTitle = enrichment.originalTitle,
+            originalLanguage = enrichment.originalLanguage ?: enrichment.language,
+            sourceTitle = "",
+            isChinese = isChinese,
+        ).ifBlank { "TMDB $tmdbId" }
+
+        val resolvedPoster = resolveArtworkFallback(
+            preferredArtwork = enrichment.poster,
+            fallbackTmdbArtwork = enrichment.posterFallback,
+            sourceArtwork = null,
+            isChinese = isChinese,
+        )
+        val resolvedBackground = resolveArtworkFallback(
+            preferredArtwork = enrichment.backdrop,
+            fallbackTmdbArtwork = enrichment.backdropFallback,
+            sourceArtwork = null,
+            isChinese = isChinese,
+        )
+        val resolvedLogo = resolveArtworkFallback(
+            preferredArtwork = enrichment.logo,
+            fallbackTmdbArtwork = enrichment.logoFallback,
+            sourceArtwork = null,
+            isChinese = isChinese,
+        )
+
+        return MetaDetails(
             id = id,
             type = type,
-            name = enrichment.localizedTitle ?: "TMDB $tmdbId",
-            poster = enrichment.poster,
-            background = enrichment.backdrop,
-            logo = enrichment.logo,
+            name = resolvedName,
+            poster = resolvedPoster,
+            background = resolvedBackground,
+            logo = resolvedLogo,
             description = enrichment.description,
             releaseInfo = enrichment.releaseInfo,
             lastAirDate = enrichment.lastAirDate,
@@ -786,6 +960,7 @@ object TmdbMetadataService {
             collectionItems = enrichment.collectionItems,
             trailers = enrichment.trailers,
         )
+    }
 
     internal fun applyEnrichment(
         meta: MetaDetails,
@@ -796,22 +971,55 @@ object TmdbMetadataService {
         if (enrichment == null && episodeMap.isEmpty()) return meta
 
         var updated = meta
+        val isChinese = isChineseLanguage(settings.language)
 
         if (enrichment != null && settings.useArtwork) {
             updated = updated.copy(
-                background = enrichment.backdrop ?: updated.background,
-                poster = enrichment.poster ?: updated.poster,
-                logo = enrichment.logo ?: updated.logo,
+                background = resolveArtworkFallback(
+                    preferredArtwork = enrichment.backdrop,
+                    fallbackTmdbArtwork = enrichment.backdropFallback,
+                    sourceArtwork = updated.background,
+                    isChinese = isChinese,
+                ),
+                poster = resolveArtworkFallback(
+                    preferredArtwork = enrichment.poster,
+                    fallbackTmdbArtwork = enrichment.posterFallback,
+                    sourceArtwork = updated.poster,
+                    isChinese = isChinese,
+                ),
+                logo = resolveArtworkFallback(
+                    preferredArtwork = enrichment.logo,
+                    fallbackTmdbArtwork = enrichment.logoFallback,
+                    sourceArtwork = updated.logo,
+                    isChinese = isChinese,
+                ),
             )
         }
 
         if (enrichment != null && settings.useBasicInfo) {
             updated = updated.copy(
-                name = enrichment.localizedTitle ?: updated.name,
-                description = enrichment.description ?: updated.description,
+                name = resolveLocalizedTitle(
+                    targetTitle = enrichment.localizedTitle,
+                    zhTitle = enrichment.genericZhTitle,
+                    originalTitle = enrichment.originalTitle,
+                    originalLanguage = enrichment.originalLanguage ?: enrichment.language,
+                    sourceTitle = updated.name,
+                    isChinese = isChinese,
+                ),
+                description = resolveLocalizedOverview(
+                    targetOverview = enrichment.description,
+                    zhOverview = null,
+                    sourceOverview = updated.description,
+                    isChinese = isChinese,
+                ),
                 imdbRating = updated.imdbRating?.takeIf { it.isNotBlank() }
                     ?: enrichment.rating?.formatRating(),
-                genres = enrichment.genres.ifEmpty { updated.genres },
+                genres = resolveLocalizedGenres(
+                    targetGenres = enrichment.targetGenres.ifEmpty { enrichment.genres },
+                    zhGenres = enrichment.genericZhGenres,
+                    sourceGenres = updated.genres,
+                    isChinese = isChinese,
+                ),
             )
         }
 
@@ -849,7 +1057,35 @@ object TmdbMetadataService {
         }
 
         if (episodeMap.isNotEmpty()) {
+            val enrichedSeasonNames = episodeMap.entries.mapNotNull { (key, epEnrichment) ->
+                val season = key.first
+                val sName = epEnrichment.seasonName?.trim()?.takeIf(String::isNotBlank)
+                    ?: return@mapNotNull null
+                season to sName
+            }.toMap()
+
+            val resolvedSeasonNames = if (settings.useEpisodes && enrichedSeasonNames.isNotEmpty()) {
+                buildMap {
+                    putAll(updated.seasonNames)
+                    enrichedSeasonNames.forEach { (season, sName) ->
+                        val sourceName = updated.seasonNames[season]
+                        put(
+                            season,
+                            resolveSeasonNameFallback(
+                                enrichmentSeasonName = sName,
+                                sourceSeasonName = sourceName,
+                                seasonNumber = season,
+                                isChinese = isChinese,
+                            ),
+                        )
+                    }
+                }
+            } else {
+                updated.seasonNames
+            }
+
             updated = updated.copy(
+                seasonNames = resolvedSeasonNames,
                 videos = meta.videos.map { video ->
                     val key = video.season?.let { season ->
                         video.episode?.let { episode -> season to episode }
@@ -860,12 +1096,20 @@ object TmdbMetadataService {
                     } else {
                         video.copy(
                             title = if (settings.useEpisodes) {
-                                enrichmentForEpisode.title ?: video.title
+                                resolveEpisodeNameFallback(
+                                    enrichmentName = enrichmentForEpisode.title,
+                                    sourceName = video.title,
+                                    isChinese = isChinese,
+                                )
                             } else {
                                 video.title
                             },
                             overview = if (settings.useEpisodes) {
-                                enrichmentForEpisode.overview ?: video.overview
+                                resolveEpisodeOverviewFallback(
+                                    enrichmentOverview = enrichmentForEpisode.overview,
+                                    sourceOverview = video.overview,
+                                    isChinese = isChinese,
+                                )
                             } else {
                                 video.overview
                             },
@@ -923,7 +1167,7 @@ object TmdbMetadataService {
         settings: TmdbSettings,
     ): TmdbEnrichment? = withContext(Dispatchers.Default) {
         val normalizedLanguage = normalizeTmdbLanguage(language)
-        val cacheKey = "$tmdbId:$mediaType:$normalizedLanguage"
+        val cacheKey = buildEnrichmentCacheKey(tmdbId, mediaType, normalizedLanguage)
         enrichmentCache[cacheKey]?.let { return@withContext it }
 
         val numericId = tmdbId.toIntOrNull() ?: return@withContext null
@@ -1002,6 +1246,28 @@ object TmdbMetadataService {
         val details = response.first ?: return@withContext null
         val credits = response.second
         val images = response.third
+
+        val isChinese = isChineseLanguage(normalizedLanguage)
+        val originalTitle = listOf(details.originalTitle, details.originalName).firstNotNullOfOrNull { it?.trim()?.takeIf(String::isNotBlank) }
+        val primaryTitle = listOf(details.title, details.name).firstNotNullOfOrNull { it?.trim()?.takeIf(String::isNotBlank) }
+
+        val zhDetails = if (isChinese && normalizedLanguage != "zh") {
+            val titleMatchesOriginal = primaryTitle == null || (originalTitle != null && primaryTitle.equals(originalTitle, ignoreCase = true))
+            val overviewMissing = details.overview.isNullOrBlank()
+            val genresEnglishOrEmpty = details.genres.none { containsChinese(it.name) }
+            val collectionMissing = details.belongsToCollection != null && details.belongsToCollection.name.isNullOrBlank()
+            if (titleMatchesOriginal || overviewMissing || genresEnglishOrEmpty || collectionMissing) {
+                fetch<TmdbDetailsResponse>(
+                    endpoint = "$mediaType/$numericId",
+                    query = mapOf("language" to "zh"),
+                )
+            } else {
+                null
+            }
+        } else {
+            null
+        }
+
         val englishFallbackNames = fetchEnglishFallbackNames(
             numericId = numericId,
             mediaType = mediaType,
@@ -1010,10 +1276,24 @@ object TmdbMetadataService {
             credits = credits,
         )
 
-        val genres = details.genres.mapNotNull { it.name?.trim()?.takeIf(String::isNotBlank) }
-        val description = details.overview?.trim()?.takeIf(String::isNotBlank)
+        val targetGenres = details.genres.mapNotNull { it.name?.trim()?.takeIf(String::isNotBlank) }
+        val zhGenres = zhDetails?.genres.orEmpty().mapNotNull { it.name?.trim()?.takeIf(String::isNotBlank) }
+        val resolvedGenres = resolveLocalizedGenres(
+            targetGenres = targetGenres,
+            zhGenres = zhGenres,
+            sourceGenres = emptyList(),
+            isChinese = isChinese,
+        )
+
+        val description = if (isChinese) {
+            details.overview?.trim()?.takeIf(String::isNotBlank)
+                ?: zhDetails?.overview?.trim()?.takeIf(String::isNotBlank)
+        } else {
+            details.overview?.trim()?.takeIf(String::isNotBlank)
+        }
         val releaseInfo = details.releaseDate ?: details.firstAirDate
-        val localizedTitle = listOf(details.title, details.name).firstNotNullOfOrNull { it?.trim()?.takeIf(String::isNotBlank) }
+        val zhTitle = listOf(zhDetails?.title, zhDetails?.name).firstNotNullOfOrNull { it?.trim()?.takeIf(String::isNotBlank) }
+
         val people = buildPeople(
             details = details,
             credits = credits,
@@ -1037,13 +1317,37 @@ object TmdbMetadataService {
         )
         val lastAirDate = details.lastAirDate?.trim()?.takeIf(String::isNotBlank)
             ?.takeIf { mediaType == "tv" }
+
+        val posterSelection = images?.posters.orEmpty().selectLocalizedArtwork(normalizedLanguage)
+        val bestPosterPreferred = posterSelection.preferredPath
+            ?: (details.posterPath.takeIf { !isChinese })
+        val bestPosterFallback = posterSelection.fallbackPath
+            ?: (details.posterPath.takeIf { isChinese })
+
+        val backdropSelection = images?.backdrops.orEmpty().selectLocalizedArtwork(normalizedLanguage)
+        val bestBackdropPreferred = backdropSelection.preferredPath
+            ?: (details.backdropPath.takeIf { !isChinese })
+        val bestBackdropFallback = backdropSelection.fallbackPath
+            ?: (details.backdropPath.takeIf { isChinese })
+
+        val logoSelection = images?.logos.orEmpty().selectLocalizedArtwork(normalizedLanguage)
+        val bestLogoPreferred = logoSelection.preferredPath
+        val bestLogoFallback = logoSelection.fallbackPath
+
         val enrichment = TmdbEnrichment(
-            localizedTitle = localizedTitle,
+            localizedTitle = primaryTitle,
+            genericZhTitle = zhTitle,
+            originalTitle = originalTitle,
             description = description,
-            genres = genres,
-            backdrop = buildImageUrl(details.backdropPath, "w1280"),
-            logo = buildImageUrl(images?.logos.orEmpty().selectBestLocalizedImagePath(normalizedLanguage), "w500"),
-            poster = buildImageUrl(details.posterPath, "w500"),
+            genres = resolvedGenres,
+            targetGenres = targetGenres,
+            genericZhGenres = zhGenres,
+            backdrop = buildImageUrl(bestBackdropPreferred, "w1280"),
+            backdropFallback = buildImageUrl(bestBackdropFallback, "w1280"),
+            logo = buildImageUrl(bestLogoPreferred, "w500"),
+            logoFallback = buildImageUrl(bestLogoFallback, "w500"),
+            poster = buildImageUrl(bestPosterPreferred, "w500"),
+            posterFallback = buildImageUrl(bestPosterFallback, "w500"),
             people = people,
             director = directors,
             writer = writers,
@@ -1059,7 +1363,12 @@ object TmdbMetadataService {
             language = details.originalLanguage?.trim()?.takeIf(String::isNotBlank),
             productionCompanies = details.productionCompanies.mapNotNull { it.toMetaCompany() },
             networks = details.networks.mapNotNull { it.toMetaCompany() },
-            collectionName = details.belongsToCollection?.name?.trim()?.takeIf(String::isNotBlank),
+            collectionName = if (isChinese) {
+                details.belongsToCollection?.name?.trim()?.takeIf(String::isNotBlank)
+                    ?: zhDetails?.belongsToCollection?.name?.trim()?.takeIf(String::isNotBlank)
+            } else {
+                details.belongsToCollection?.name?.trim()?.takeIf(String::isNotBlank)
+            },
             collectionItems = if (settings.useCollections && details.belongsToCollection?.id != null) {
                 fetchCollection(
                     collectionId = details.belongsToCollection.id,
@@ -1147,8 +1456,10 @@ object TmdbMetadataService {
         val normalizedSeasons = seasonNumbers.distinct().sorted()
         if (normalizedSeasons.isEmpty()) return@withContext emptyMap()
 
-        val cacheKey = "$numericId:${normalizedSeasons.joinToString(",")}:$normalizedLanguage"
+        val cacheKey = buildEpisodeCacheKey(numericId, normalizedSeasons, normalizedLanguage)
         episodeCache[cacheKey]?.let { return@withContext it }
+
+        val isChinese = isChineseLanguage(normalizedLanguage)
 
         val pairs = coroutineScope {
             normalizedSeasons.map { season ->
@@ -1158,16 +1469,63 @@ object TmdbMetadataService {
                         query = mapOf("language" to normalizedLanguage),
                     ) ?: return@async emptyMap()
 
+                    val defaultSeasonName = "Season $season"
+                    val seasonNameIsDefault = details.name == null || details.name.equals(defaultSeasonName, ignoreCase = true)
+                    val hasDefaultOrMissingEpisodes = details.episodes.any { ep ->
+                        val defaultEpName = ep.episodeNumber?.let { "Episode $it" }
+                        ep.name.isNullOrBlank() ||
+                            (defaultEpName != null && ep.name.equals(defaultEpName, ignoreCase = true)) ||
+                            ep.overview.isNullOrBlank()
+                    }
+                    val needsZh = isChinese && normalizedLanguage != "zh" && (seasonNameIsDefault || hasDefaultOrMissingEpisodes)
+
+                    val zhDetails = if (needsZh) {
+                        fetch<TmdbSeasonDetailsResponse>(
+                            endpoint = "tv/$numericId/season/$season",
+                            query = mapOf("language" to "zh"),
+                        )
+                    } else null
+
+                    val zhEpisodesByNumber = zhDetails?.episodes.orEmpty().associateBy { it.episodeNumber }
+
+                    val seasonName = if (isChinese) {
+                        val targetName = details.name?.trim()?.takeIf { it.isNotBlank() && !it.equals(defaultSeasonName, ignoreCase = true) }
+                        val zhName = zhDetails?.name?.trim()?.takeIf { it.isNotBlank() && !it.equals(defaultSeasonName, ignoreCase = true) }
+                        targetName ?: zhName ?: details.name?.trim()?.takeIf(String::isNotBlank)
+                    } else {
+                        details.name?.trim()?.takeIf(String::isNotBlank)
+                    }
+
                     details.episodes
                         .mapNotNull { episode ->
                             val episodeNumber = episode.episodeNumber ?: return@mapNotNull null
+                            val zhEp = zhEpisodesByNumber[episodeNumber]
+                            val defaultEpName = "Episode $episodeNumber"
+
+                            val epTitle = if (isChinese) {
+                                val targetName = episode.name?.trim()?.takeIf { it.isNotBlank() && !it.equals(defaultEpName, ignoreCase = true) }
+                                val zhName = zhEp?.name?.trim()?.takeIf { it.isNotBlank() && !it.equals(defaultEpName, ignoreCase = true) }
+                                targetName ?: zhName ?: episode.name?.trim()?.takeIf(String::isNotBlank)
+                            } else {
+                                episode.name?.trim()?.takeIf(String::isNotBlank)
+                            }
+
+                            val epOverview = if (isChinese) {
+                                episode.overview?.trim()?.takeIf(String::isNotBlank)
+                                    ?: zhEp?.overview?.trim()?.takeIf(String::isNotBlank)
+                            } else {
+                                episode.overview?.trim()?.takeIf(String::isNotBlank)
+                            }
+
                             (season to episodeNumber) to TmdbEpisodeEnrichment(
-                                title = episode.name?.trim()?.takeIf(String::isNotBlank),
-                                overview = episode.overview?.trim()?.takeIf(String::isNotBlank),
-                                thumbnail = buildImageUrl(episode.stillPath, "w500"),
-                                seasonPoster = buildImageUrl(details.posterPath, "w500"),
-                                airDate = episode.airDate?.trim()?.takeIf(String::isNotBlank),
-                                runtimeMinutes = episode.runtime,
+                                title = epTitle,
+                                overview = epOverview,
+                                thumbnail = buildImageUrl(episode.stillPath ?: zhEp?.stillPath, "w500"),
+                                seasonPoster = buildImageUrl(details.posterPath ?: zhDetails?.posterPath, "w500"),
+                                seasonName = seasonName,
+                                airDate = episode.airDate?.trim()?.takeIf(String::isNotBlank)
+                                    ?: zhEp?.airDate?.trim()?.takeIf(String::isNotBlank),
+                                runtimeMinutes = episode.runtime ?: zhEp?.runtime,
                             )
                         }
                         .toMap()
@@ -1186,10 +1544,21 @@ object TmdbMetadataService {
         endpoint: String,
         query: Map<String, String> = emptyMap(),
     ): T? {
+        val override = httpFetcherOverride
+        if (override != null) {
+            return runCatching {
+                val responseText = override(endpoint, query)
+                json.decodeFromString<T>(responseText)
+            }.onFailure { error ->
+                log.w { "TMDB request failed for $endpoint (override): ${error.message}" }
+            }.getOrNull()
+        }
+
         val apiKey = TmdbSettingsRepository.effectiveApiKey().takeIf(String::isNotBlank) ?: return null
         val url = buildTmdbUrl(endpoint = endpoint, apiKey = apiKey, query = query)
         return runCatching {
-            json.decodeFromString<T>(httpGetText(url))
+            val responseText = httpGetText(url)
+            json.decodeFromString<T>(responseText)
         }.onFailure { error ->
             log.w { "TMDB request failed for $endpoint: ${error.message}" }
         }.getOrNull()
@@ -1200,13 +1569,29 @@ object TmdbMetadataService {
         mediaType: String,
         language: String,
     ): List<MetaPreview> {
-        val cacheKey = "$tmdbId:$mediaType:$language:recommendations"
+        val normalizedLanguage = normalizeTmdbLanguage(language)
+        val cacheKey = buildMoreLikeThisCacheKey(tmdbId, mediaType, normalizedLanguage)
         moreLikeThisCache[cacheKey]?.let { return it }
 
         val response = fetch<TmdbRecommendationResponse>(
             endpoint = "$mediaType/$tmdbId/recommendations",
-            query = mapOf("language" to language),
+            query = mapOf("language" to normalizedLanguage),
         ) ?: return emptyList()
+
+        val isChinese = isChineseLanguage(normalizedLanguage)
+        val hasUntranslatedItems = isChinese && response.results.any { rec ->
+            val orig = rec.originalTitle ?: rec.originalName
+            val curr = rec.title ?: rec.name
+            orig != null && curr != null && curr.equals(orig, ignoreCase = true)
+        }
+        val zhResponse = if (isChinese && normalizedLanguage != "zh" && hasUntranslatedItems) {
+            fetch<TmdbRecommendationResponse>(
+                endpoint = "$mediaType/$tmdbId/recommendations",
+                query = mapOf("language" to "zh"),
+            )
+        } else null
+
+        val zhItemsById = zhResponse?.results.orEmpty().associateBy { it.id }
 
         val items = response.results
             .filter { it.id > 0 }
@@ -1216,13 +1601,34 @@ object TmdbMetadataService {
                     "movie" -> "movie"
                     else -> if (mediaType == "tv") "series" else "movie"
                 }
-                val title = recommendation.title
+                val original = recommendation.originalTitle ?: recommendation.originalName
+                val primaryTitle = recommendation.title
                     ?.trim()
                     ?.takeIf(String::isNotBlank)
                     ?: recommendation.name?.trim()?.takeIf(String::isNotBlank)
-                    ?: recommendation.originalTitle?.trim()?.takeIf(String::isNotBlank)
-                    ?: recommendation.originalName?.trim()?.takeIf(String::isNotBlank)
-                    ?: return@mapNotNull null
+
+                val zhItem = zhItemsById[recommendation.id]
+                val zhTitle = zhItem?.title?.trim()?.takeIf(String::isNotBlank)
+                    ?: zhItem?.name?.trim()?.takeIf(String::isNotBlank)
+
+                val title = if (isChinese) {
+                    if (primaryTitle != null && (original == null || !primaryTitle.equals(original, ignoreCase = true))) {
+                        primaryTitle
+                    } else if (zhTitle != null && (original == null || !zhTitle.equals(original, ignoreCase = true))) {
+                        zhTitle
+                    } else {
+                        primaryTitle ?: zhTitle ?: original ?: return@mapNotNull null
+                    }
+                } else {
+                    primaryTitle ?: original ?: return@mapNotNull null
+                }
+
+                val description = if (isChinese) {
+                    recommendation.overview?.trim()?.takeIf(String::isNotBlank)
+                        ?: zhItem?.overview?.trim()?.takeIf(String::isNotBlank)
+                } else {
+                    recommendation.overview?.trim()?.takeIf(String::isNotBlank)
+                }
 
                 MetaPreview(
                     id = "tmdb:${recommendation.id}",
@@ -1232,7 +1638,7 @@ object TmdbMetadataService {
                         ?: buildImageUrl(recommendation.backdropPath, "w780"),
                     banner = buildImageUrl(recommendation.backdropPath, "w1280"),
                     posterShape = PosterShape.Poster,
-                    description = recommendation.overview?.trim()?.takeIf(String::isNotBlank),
+                    description = description,
                     releaseInfo = (recommendation.releaseDate ?: recommendation.firstAirDate)?.take(4),
                     rawReleaseDate = recommendation.releaseDate ?: recommendation.firstAirDate,
                     imdbRating = recommendation.voteAverage?.formatRating(),
@@ -1248,18 +1654,64 @@ object TmdbMetadataService {
         collectionId: Int,
         language: String,
     ): Pair<String?, List<MetaPreview>> {
-        val cacheKey = "$collectionId:$language:collection"
+        val normalizedLanguage = normalizeTmdbLanguage(language)
+        val cacheKey = buildCollectionCacheKey(collectionId, normalizedLanguage)
         collectionCache[cacheKey]?.let { return it }
 
         val response = fetch<TmdbCollectionResponse>(
             endpoint = "collection/$collectionId",
-            query = mapOf("language" to language),
+            query = mapOf("language" to normalizedLanguage),
         ) ?: return null to emptyList()
+
+        val isChinese = isChineseLanguage(normalizedLanguage)
+        val hasUntranslatedParts = isChinese && response.parts.any { part ->
+            val orig = part.originalTitle
+            val curr = part.title
+            orig != null && curr != null && curr.equals(orig, ignoreCase = true)
+        }
+        val zhResponse = if (isChinese && normalizedLanguage != "zh" && (response.name.isNullOrBlank() || hasUntranslatedParts)) {
+            fetch<TmdbCollectionResponse>(
+                endpoint = "collection/$collectionId",
+                query = mapOf("language" to "zh"),
+            )
+        } else null
+
+        val zhPartsById = zhResponse?.parts.orEmpty().associateBy { it.id }
+
+        val collectionName = if (isChinese) {
+            response.name?.trim()?.takeIf(String::isNotBlank)
+                ?: zhResponse?.name?.trim()?.takeIf(String::isNotBlank)
+        } else {
+            response.name
+        }?.trim()?.takeIf(String::isNotBlank)
 
         val items = response.parts
             .sortedBy { it.releaseDate ?: "9999" }
             .mapNotNull { part ->
-                val title = part.title?.trim()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                val zhPart = zhPartsById[part.id]
+                val orig = part.originalTitle
+                val primaryTitle = part.title?.trim()?.takeIf(String::isNotBlank)
+                val zhTitle = zhPart?.title?.trim()?.takeIf(String::isNotBlank)
+
+                val title = if (isChinese) {
+                    if (primaryTitle != null && (orig == null || !primaryTitle.equals(orig, ignoreCase = true))) {
+                        primaryTitle
+                    } else if (zhTitle != null && (orig == null || !zhTitle.equals(orig, ignoreCase = true))) {
+                        zhTitle
+                    } else {
+                        primaryTitle ?: zhTitle ?: orig ?: return@mapNotNull null
+                    }
+                } else {
+                    primaryTitle ?: orig ?: return@mapNotNull null
+                }
+
+                val description = if (isChinese) {
+                    part.overview?.trim()?.takeIf(String::isNotBlank)
+                        ?: zhPart?.overview?.trim()?.takeIf(String::isNotBlank)
+                } else {
+                    part.overview?.trim()?.takeIf(String::isNotBlank)
+                }
+
                 MetaPreview(
                     id = "tmdb:${part.id}",
                     type = "movie",
@@ -1268,14 +1720,14 @@ object TmdbMetadataService {
                         ?: buildImageUrl(part.posterPath, "w500"),
                     banner = buildImageUrl(part.backdropPath, "w1280"),
                     posterShape = PosterShape.Landscape,
-                    description = part.overview?.trim()?.takeIf(String::isNotBlank),
+                    description = description,
                     releaseInfo = part.releaseDate?.take(4),
                     rawReleaseDate = part.releaseDate,
                     imdbRating = part.voteAverage?.formatRating(),
                 )
             }
 
-        val result = response.name?.trim()?.takeIf(String::isNotBlank) to items
+        val result = collectionName to items
         collectionCache[cacheKey] = result
         return result
     }
@@ -1285,7 +1737,8 @@ object TmdbMetadataService {
         mediaType: String,
         language: String,
     ): List<MetaTrailer> {
-        val cacheKey = "$tmdbId:$mediaType:$language:trailers"
+        val normalizedLanguage = normalizeTmdbLanguage(language)
+        val cacheKey = "$tmdbId:$mediaType:$normalizedLanguage:trailers"
         trailerCache[cacheKey]?.let { return it }
 
         val allVideos = mutableListOf<MetaTrailer>()
@@ -1406,24 +1859,32 @@ object TmdbMetadataService {
 
 internal data class TmdbEnrichment(
     val localizedTitle: String?,
+    val genericZhTitle: String? = null,
+    val originalTitle: String? = null,
+    val originalLanguage: String? = null,
     val description: String?,
-    val genres: List<String>,
-    val backdrop: String?,
-    val logo: String?,
-    val poster: String?,
-    val people: List<MetaPerson>,
-    val director: List<String>,
-    val writer: List<String>,
-    val releaseInfo: String?,
+    val genres: List<String> = emptyList(),
+    val targetGenres: List<String> = emptyList(),
+    val genericZhGenres: List<String> = emptyList(),
+    val backdrop: String? = null,
+    val backdropFallback: String? = null,
+    val logo: String? = null,
+    val logoFallback: String? = null,
+    val poster: String? = null,
+    val posterFallback: String? = null,
+    val people: List<MetaPerson> = emptyList(),
+    val director: List<String> = emptyList(),
+    val writer: List<String> = emptyList(),
+    val releaseInfo: String? = null,
     val lastAirDate: String? = null,
-    val rating: Double?,
-    val runtimeMinutes: Int?,
-    val ageRating: String?,
-    val status: String?,
-    val countries: List<String>,
-    val language: String?,
-    val productionCompanies: List<MetaCompany>,
-    val networks: List<MetaCompany>,
+    val rating: Double? = null,
+    val runtimeMinutes: Int? = null,
+    val ageRating: String? = null,
+    val status: String? = null,
+    val countries: List<String> = emptyList(),
+    val language: String? = null,
+    val productionCompanies: List<MetaCompany> = emptyList(),
+    val networks: List<MetaCompany> = emptyList(),
     val collectionName: String? = null,
     val collectionItems: List<MetaPreview> = emptyList(),
     val moreLikeThis: List<MetaPreview> = emptyList(),
@@ -1431,11 +1892,15 @@ internal data class TmdbEnrichment(
 ) {
     fun hasContent(): Boolean =
         localizedTitle != null ||
+            genericZhTitle != null ||
             description != null ||
             genres.isNotEmpty() ||
             backdrop != null ||
+            backdropFallback != null ||
             logo != null ||
+            logoFallback != null ||
             poster != null ||
+            posterFallback != null ||
             people.isNotEmpty() ||
             director.isNotEmpty() ||
             writer.isNotEmpty() ||
@@ -1460,11 +1925,283 @@ private data class EnrichmentPayload(
     val trailers: List<MetaTrailer>,
 )
 
+internal fun containsChinese(text: String?): Boolean {
+    if (text.isNullOrBlank()) return false
+    return text.any { ch ->
+        ch in '\u4E00'..'\u9FFF' ||
+            ch in '\u3400'..'\u4DBF' ||
+            ch in '\uF900'..'\uFAFF'
+    }
+}
+
+internal fun resolveLocalizedTitle(
+    targetTitle: String?,
+    zhTitle: String?,
+    originalTitle: String?,
+    originalLanguage: String?,
+    sourceTitle: String,
+    isChinese: Boolean,
+): String {
+    val target = targetTitle?.trim()?.takeIf { it.isNotBlank() }
+    val zh = zhTitle?.trim()?.takeIf { it.isNotBlank() }
+    val original = originalTitle?.trim()?.takeIf { it.isNotBlank() }
+    val source = sourceTitle.trim()
+
+    if (!isChinese) {
+        return target ?: source.takeIf { it.isNotBlank() } ?: original ?: ""
+    }
+
+    if (originalLanguage?.equals("zh", ignoreCase = true) == true) {
+        return target ?: zh ?: source.takeIf { it.isNotBlank() } ?: original ?: ""
+    }
+
+    if (target != null && (original == null || !target.equals(original, ignoreCase = true))) {
+        return target
+    }
+
+    if (zh != null && (original == null || !zh.equals(original, ignoreCase = true))) {
+        return zh
+    }
+
+    if (source.isNotBlank()) {
+        return source
+    }
+
+    return target ?: zh ?: original ?: ""
+}
+
+internal fun resolveLocalizedOverview(
+    targetOverview: String?,
+    zhOverview: String?,
+    sourceOverview: String?,
+    isChinese: Boolean,
+): String? {
+    val target = targetOverview?.trim()?.takeIf { it.isNotBlank() }
+    val zh = zhOverview?.trim()?.takeIf { it.isNotBlank() }
+    val source = sourceOverview?.trim()?.takeIf { it.isNotBlank() }
+
+    if (!isChinese) {
+        return target ?: source
+    }
+
+    return target ?: zh ?: source
+}
+
+internal fun resolveLocalizedGenres(
+    targetGenres: List<String>,
+    zhGenres: List<String>,
+    sourceGenres: List<String>,
+    isChinese: Boolean,
+): List<String> {
+    if (!isChinese) {
+        return targetGenres.ifEmpty { sourceGenres }
+    }
+
+    if (targetGenres.any(::containsChinese)) {
+        return targetGenres
+    }
+
+    if (zhGenres.any(::containsChinese)) {
+        return zhGenres
+    }
+
+    if (sourceGenres.isNotEmpty()) {
+        return sourceGenres
+    }
+
+    return targetGenres.ifEmpty { zhGenres }
+}
+
+internal fun resolveLocalizedEpisodeName(
+    targetName: String?,
+    zhName: String?,
+    episodeNumber: Int?,
+    sourceName: String,
+    isChinese: Boolean,
+): String {
+    val target = targetName?.trim()?.takeIf { it.isNotBlank() }
+    val zh = zhName?.trim()?.takeIf { it.isNotBlank() }
+    val source = sourceName.trim()
+
+    if (!isChinese) {
+        return target ?: source
+    }
+
+    val defaultEpisodeName = episodeNumber?.let { "Episode $it" }
+    val isTargetDefault = target != null && defaultEpisodeName != null && target.equals(defaultEpisodeName, ignoreCase = true)
+
+    if (target != null && !isTargetDefault) {
+        return target
+    }
+
+    val isZhDefault = zh != null && defaultEpisodeName != null && zh.equals(defaultEpisodeName, ignoreCase = true)
+    if (zh != null && !isZhDefault) {
+        return zh
+    }
+
+    if (source.isNotBlank()) {
+        return source
+    }
+
+    return target ?: zh ?: defaultEpisodeName ?: ""
+}
+
+internal fun resolveLocalizedEpisodeOverview(
+    targetOverview: String?,
+    zhOverview: String?,
+    sourceOverview: String?,
+    isChinese: Boolean,
+): String? {
+    val target = targetOverview?.trim()?.takeIf { it.isNotBlank() }
+    val zh = zhOverview?.trim()?.takeIf { it.isNotBlank() }
+    val source = sourceOverview?.trim()?.takeIf { it.isNotBlank() }
+
+    if (!isChinese) {
+        return target ?: source
+    }
+
+    return target ?: zh ?: source
+}
+
+internal fun resolveLocalizedSeasonName(
+    targetSeasonName: String?,
+    zhSeasonName: String?,
+    seasonNumber: Int,
+    sourceSeasonName: String?,
+    isChinese: Boolean,
+): String {
+    val target = targetSeasonName?.trim()?.takeIf { it.isNotBlank() }
+    val zh = zhSeasonName?.trim()?.takeIf { it.isNotBlank() }
+    val source = sourceSeasonName?.trim()?.takeIf { it.isNotBlank() }
+
+    if (!isChinese) {
+        return target ?: source ?: ""
+    }
+
+    val defaultSeasonName = "Season $seasonNumber"
+    val isTargetDefault = target != null && target.equals(defaultSeasonName, ignoreCase = true)
+
+    if (target != null && !isTargetDefault) {
+        return target
+    }
+
+    val isZhDefault = zh != null && zh.equals(defaultSeasonName, ignoreCase = true)
+    if (zh != null && !isZhDefault) {
+        return zh
+    }
+
+    return source ?: target ?: zh ?: ""
+}
+
+internal fun resolveArtworkFallback(
+    preferredArtwork: String?,
+    fallbackTmdbArtwork: String?,
+    sourceArtwork: String?,
+    isChinese: Boolean,
+): String? {
+    if (!isChinese) {
+        return preferredArtwork ?: fallbackTmdbArtwork ?: sourceArtwork
+    }
+
+    if (!preferredArtwork.isNullOrBlank()) {
+        return preferredArtwork
+    }
+
+    if (!sourceArtwork.isNullOrBlank()) {
+        return sourceArtwork
+    }
+
+    if (!fallbackTmdbArtwork.isNullOrBlank()) {
+        return fallbackTmdbArtwork
+    }
+
+    return null
+}
+
+internal fun resolveTitleFallback(
+    enrichmentTitle: String?,
+    sourceTitle: String,
+    isChinese: Boolean,
+): String = resolveLocalizedTitle(
+    targetTitle = enrichmentTitle,
+    zhTitle = null,
+    originalTitle = null,
+    originalLanguage = null,
+    sourceTitle = sourceTitle,
+    isChinese = isChinese,
+)
+
+internal fun resolveOverviewFallback(
+    enrichmentOverview: String?,
+    sourceOverview: String?,
+    isChinese: Boolean,
+): String? = resolveLocalizedOverview(
+    targetOverview = enrichmentOverview,
+    zhOverview = null,
+    sourceOverview = sourceOverview,
+    isChinese = isChinese,
+)
+
+internal fun resolveEpisodeNameFallback(
+    enrichmentName: String?,
+    sourceName: String,
+    isChinese: Boolean,
+): String = resolveLocalizedEpisodeName(
+    targetName = enrichmentName,
+    zhName = null,
+    episodeNumber = null,
+    sourceName = sourceName,
+    isChinese = isChinese,
+)
+
+internal fun resolveEpisodeOverviewFallback(
+    enrichmentOverview: String?,
+    sourceOverview: String?,
+    isChinese: Boolean,
+): String? = resolveLocalizedEpisodeOverview(
+    targetOverview = enrichmentOverview,
+    zhOverview = null,
+    sourceOverview = sourceOverview,
+    isChinese = isChinese,
+)
+
+internal fun resolveSeasonNameFallback(
+    enrichmentSeasonName: String?,
+    sourceSeasonName: String?,
+    seasonNumber: Int,
+    isChinese: Boolean,
+): String = resolveLocalizedSeasonName(
+    targetSeasonName = enrichmentSeasonName,
+    zhSeasonName = null,
+    seasonNumber = seasonNumber,
+    sourceSeasonName = sourceSeasonName,
+    isChinese = isChinese,
+)
+
+internal fun buildEnrichmentCacheKey(tmdbId: String, mediaType: String, language: String): String =
+    "$tmdbId:$mediaType:${normalizeTmdbLanguage(language)}"
+
+internal fun buildEpisodeCacheKey(numericId: Int, seasons: List<Int>, language: String): String =
+    "$numericId:${seasons.distinct().sorted().joinToString(",")}:${normalizeTmdbLanguage(language)}"
+
+internal fun buildMoreLikeThisCacheKey(tmdbId: Int, mediaType: String, language: String): String =
+    "$tmdbId:$mediaType:${normalizeTmdbLanguage(language)}:recommendations"
+
+internal fun buildCollectionCacheKey(collectionId: Int, language: String): String =
+    "$collectionId:${normalizeTmdbLanguage(language)}:collection"
+
+internal fun buildBackdropCacheKey(tmdbId: String, mediaType: String, language: String): String =
+    "$tmdbId:$mediaType:${normalizeTmdbLanguage(language)}"
+
+internal fun buildPersonCacheKey(personId: Int, preferCrewCredits: Boolean?, language: String): String =
+    "$personId:${preferCrewCredits?.toString() ?: "auto"}:${normalizeTmdbLanguage(language)}"
+
 internal data class TmdbEpisodeEnrichment(
     val title: String?,
     val overview: String?,
     val thumbnail: String?,
     val seasonPoster: String? = null,
+    val seasonName: String? = null,
     val airDate: String?,
     val runtimeMinutes: Int?,
 )
@@ -1836,6 +2573,8 @@ private data class Quadruple<A, B, C, D>(
 private data class TmdbDetailsResponse(
     val title: String? = null,
     val name: String? = null,
+    @SerialName("original_title") val originalTitle: String? = null,
+    @SerialName("original_name") val originalName: String? = null,
     val overview: String? = null,
     @SerialName("release_date") val releaseDate: String? = null,
     @SerialName("first_air_date") val firstAirDate: String? = null,
@@ -2066,6 +2805,7 @@ private data class TmdbCollectionResponse(
 private data class TmdbCollectionPart(
     val id: Int,
     val title: String? = null,
+    @SerialName("original_title") val originalTitle: String? = null,
     @SerialName("poster_path") val posterPath: String? = null,
     @SerialName("backdrop_path") val backdropPath: String? = null,
     val overview: String? = null,
@@ -2075,6 +2815,7 @@ private data class TmdbCollectionPart(
 
 @Serializable
 private data class TmdbSeasonDetailsResponse(
+    val name: String? = null,
     @SerialName("poster_path") val posterPath: String? = null,
     val episodes: List<TmdbEpisodeResponse> = emptyList(),
 )
