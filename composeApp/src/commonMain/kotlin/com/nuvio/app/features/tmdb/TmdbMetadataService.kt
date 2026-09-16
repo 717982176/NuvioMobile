@@ -138,11 +138,17 @@ object TmdbMetadataService {
 
             val (zhPerson, zhCredits) = if (isChinese && language != "zh") {
                 val needZhPerson = person.biography.isNullOrBlank()
-                val needZhCredits = (credits?.cast.orEmpty() + credits?.crew.orEmpty()).any {
-                    val orig = it.originalTitle ?: it.originalName
-                    val curr = it.title ?: it.name
+                val needZhCastCredits = credits?.cast.orEmpty().any { credit ->
+                    val orig = credit.originalTitle ?: credit.originalName
+                    val curr = credit.title ?: credit.name
                     curr != null && orig != null && curr.equals(orig, ignoreCase = true)
                 }
+                val needZhCrewCredits = credits?.crew.orEmpty().any { credit ->
+                    val orig = credit.originalTitle ?: credit.originalName
+                    val curr = credit.title ?: credit.name
+                    curr != null && orig != null && curr.equals(orig, ignoreCase = true)
+                }
+                val needZhCredits = needZhCastCredits || needZhCrewCredits
                 if (needZhPerson || needZhCredits) {
                     coroutineScope {
                         val zhPersonDeferred = if (needZhPerson) async {
