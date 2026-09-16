@@ -72,6 +72,9 @@ jobs:
       - name: Prepare iOS dependencies
         run: ./scripts/prepare-ios-dependencies.sh
 
+      - name: Run common metadata tests
+        run: ./gradlew :composeApp:iosSimulatorArm64Test --stacktrace
+
       - name: Build unsigned full ${{ inputs.configuration }} IPA
         run: |
           (
