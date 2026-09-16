@@ -71,6 +71,17 @@
 
 ---
 
+## Phase 1.5: Official Binary Feature Gap Audit (COMPLETE — Independent Audit Approved)
+- **Status:** Complete — Informational baseline audit documented in `Docs/project/OFFICIAL_BINARY_FEATURE_GAP_AUDIT.md`.
+- **Scope & Findings:**
+  - Audited feature gaps between official release binary (as observed in user-confirmed iOS execution) and public `upstream/cmp-rewrite` 0.4.22.
+  - Confirmed `OMDb Ratings` and `Live TV` are `PUBLIC_SOURCE_MISSING` in open-source `cmp-rewrite` and originated in `NuvioMobile-Enhanced`.
+  - Confirmed iOS Native PiP is `PUBLIC_SOURCE_PARTIAL` (common abstraction present, iOS actual is a false stub).
+  - Categorized for fork roadmap: OMDb Ratings scheduled for Phase 9 (Settings & UX); Live TV scheduled for post-MVP evaluation.
+- **Rule:** Strictly observational and informational. No business logic, player, or feature policy code modified.
+
+---
+
 ## Phase 2: Chinese Metadata Enrichment (TMDB zh-CN Integration)
 - **Files/Modules:**
   - `composeApp/src/commonMain/kotlin/com/nuvio/app/features/tmdb/TmdbMetadataService.kt`
