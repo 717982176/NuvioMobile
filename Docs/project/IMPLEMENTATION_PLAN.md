@@ -6,7 +6,7 @@
 
 ---
 
-## Phase 0: Baseline Verification & Pre-Implementation Audit (IN PROGRESS)
+## Phase 0: Baseline Verification & Pre-Implementation Audit (CLOSED - PASSED)
 - **Files/Modules:**
   - `docs/project/PRE_IMPLEMENTATION_AUDIT.md`
   - `docs/project/IMPLEMENTATION_PLAN.md`
@@ -18,16 +18,22 @@
   - Architecture, player engine, storage, and build workflows completely audited without guessing.
   - Zero modifications to production source code.
 - **Phase 0 Closure Gate (Cloud Baseline Build Status):**
-  - **Initial Execution (Build Test IPA #2):** FAILED at `:composeApp:generateRuntimeConfigs` because GitHub forks do not inherit upstream `secrets.NUVIO_LOCAL_PROPERTIES_BASE64`, leaving `local.properties` absent for Gradle 9.4.1.
+  - **Build Test IPA #2 (Failure Analysis):** FAILED at `:composeApp:generateRuntimeConfigs` because GitHub forks do not inherit upstream `secrets.NUVIO_LOCAL_PROPERTIES_BASE64`, leaving `local.properties` absent for Gradle 9.4.1.
   - **Remediation Applied:** Adjusted `.github/workflows/ios-test-build.yml` to always execute `Configure runtime properties`, writing an empty `local.properties` when the secret is absent. Zero application source code modified.
-  - **Current Gate State:** **PENDING RE-RUN (NOT YET PASSED)**.
-  - **Requirement:** User must trigger `Build Test IPA` (Debug) on GitHub Actions. The Phase 0 Gate will transition to PASSED only upon successful generation and upload of the unsigned IPA artifact.
-  - **Strict Gate Rule:** DO NOT enter Phase 1 until this baseline cloud build succeeds.
+  - **Build Test IPA #3 (Verification Success):**
+    - Status: Success
+    - Branch: `develop/cn-emby`
+    - Configuration: Debug
+    - Distribution: full
+    - Signing: unsigned
+    - Artifacts: 1 (`nuvio-0.4.21-full-debug.ipa`, 64 MB)
+  - **Toolchain & Pipeline Validation:** `macos-26-arm64`, Xcode 26.6, iPhoneOS SDK, MPVKit submodule, Nuvio Engine XCFramework, and unsigned IPA packaging are all empirically **VERIFIED**.
+  - **Closure Gate State:** **PASS (OFFICIALLY CLOSED)**. Pure upstream baseline + fork configuration + GitHub Actions environment successfully proven.
 - **Rollback Point:** `git checkout develop/cn-emby && git reset --hard 9bc77bc4`
 
 ---
 
-## Phase 1: Simplified Chinese UI Localization & Terminology Normalization
+## Phase 1: Simplified Chinese UI Localization & Terminology Normalization (READY)
 - **Files/Modules:**
   - `composeApp/src/commonMain/composeResources/values-zh/strings.xml` (Simplified Chinese fallback)
   - `composeApp/src/commonMain/composeResources/values-zh-rCN/strings.xml` (Mainland Simplified Chinese)

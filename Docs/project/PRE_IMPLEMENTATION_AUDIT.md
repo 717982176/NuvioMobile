@@ -5,7 +5,7 @@
 **Upstream Target:** `https://github.com/NuvioMedia/NuvioMobile.git` (`upstream/cmp-rewrite`)  
 **Development Branch:** `develop/cn-emby`  
 **Origin:** `https://github.com/717982176/NuvioMobile.git`  
-**Status:** Pre-Implementation Audit (Phase 0 Closure Gate Pending)  
+**Status:** Phase 0 CLOSED (Closure Gate Passed - Ready for Phase 1)  
 
 ---
 
@@ -443,13 +443,26 @@ Before finalized profiles are enabled, the following formats must be empirically
 
 ## 17. Phase 0 Closure Gate Status & Execution Record
 
-- **Initial Cloud Run Record (Build Test IPA #2):**
-  - Triggered via `workflow_dispatch` on `develop/cn-emby`.
-  - Confirmed operational: `macos-26-arm64` runner, Xcode 26.6, iPhoneOS SDK, MPVKit submodule, NuvioEngine framework.
-  - Halted at: `:composeApp:generateRuntimeConfigs` due to missing `local.properties` (fork secret inheritance constraint).
-  - Remediation: Updated `.github/workflows/ios-test-build.yml` with empty `local.properties` fallback.
-- **Current Gate Status:** **PENDING VERIFICATION RE-RUN**.
-  - Commit and push the workflow fix and Phase 0 audit documents to `develop/cn-emby`.
-  - Re-run `Build Test IPA` (`configuration = Debug`).
-  - The gate will strictly transition to PASSED only when an unsigned IPA Artifact is successfully generated in GitHub Actions.
-  - **Do NOT proceed to Phase 1 until the baseline cloud build passes.**
+- **Cloud Build Verification History:**
+  - **Build Test IPA #2 (Failure Analysis):**
+    - Triggered via `workflow_dispatch` on `develop/cn-emby` (`configuration = Debug`).
+    - Runner `macos-26-arm64` scheduled; Xcode 26.6 toolchain verified; MPVKit submodule and NuvioEngine dependencies prepared.
+    - Halted at: `:composeApp:generateRuntimeConfigs` because GitHub Forks do not inherit upstream repository secrets (`NUVIO_LOCAL_PROPERTIES_BASE64`), leaving `local.properties` absent.
+    - Remediation: Updated `.github/workflows/ios-test-build.yml` to automatically generate an empty `local.properties` fallback when the secret is absent, leaving upstream secret behavior untouched and requiring zero application source modifications.
+  - **Build Test IPA #3 (Verification Success):**
+    - Triggered via `workflow_dispatch` on `develop/cn-emby` (`configuration = Debug`).
+    - **Status:** Success
+    - **Branch:** `develop/cn-emby`
+    - **Configuration:** Debug
+    - **Distribution:** full
+    - **Signing:** unsigned
+    - **Artifacts:** 1 (`nuvio-0.4.21-full-debug.ipa`, size: 64 MB)
+- **Verified Platform & Toolchain Matrix:**
+  - `macos-26-arm64` GitHub Hosted Runner: **VERIFIED**
+  - Xcode 26.6 & iPhoneOS SDK: **VERIFIED**
+  - MPVKit submodule checkout: **VERIFIED**
+  - Nuvio Engine Apple XCFramework download & link: **VERIFIED**
+  - KMP Kotlin/Native compilation: **VERIFIED**
+  - Unsigned IPA packaging & Artifact upload: **VERIFIED**
+- **Phase 0 Status:** **PASS (OFFICIALLY CLOSED)**
+- **Next Phase Status:** **Phase 1 — Simplified Chinese UI Localization: READY**
