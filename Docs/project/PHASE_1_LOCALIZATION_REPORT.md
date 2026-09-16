@@ -1,11 +1,11 @@
 # Phase 1: Simplified Chinese UI Localization Report
 
-**Document Version:** 1.3.0 (Independent Audit Remediation Round 3 — Final Semantic QA)  
+**Document Version:** 1.4.0 (Post-Upstream Sync — 0.4.22)  
 **Date:** 2026-09-16  
-**Target Branch:** `feat/zh-cn-ui`  
+**Target Branch:** `develop/cn-emby`  
 **Base Commit SHA:** `bb4ea38a542d1cdc45710bfc36cf48df330e7989` (`develop/cn-emby`)  
 **Draft Reference:** Upstream PR #1941 (`7c4be28936017ee0d6ff77e773058ced576bd1f9`)  
-**Phase Status:** Implementation Complete — Pending Final Semantic Review / Cloud Verification  
+**Phase Status:** PASS — synchronized with upstream 0.4.22, Pending future upstream deltas only  
 
 ---
 
@@ -268,3 +268,38 @@ An automated scan was conducted across all 2,249 strings and 3 plurals in `value
 ## 9. Rollback Anchor
 
 - **Rollback Anchor:** `git reset --hard bb4ea38a542d1cdc45710bfc36cf48df330e7989`
+
+---
+
+## 10. Post-Upstream Sync — 0.4.22
+
+### 10.1 Background & Synchronization Audit
+Following the merge of upstream `cmp-rewrite` release `0.4.22` into `develop/cn-emby`, a resource delta audit was conducted comparing `0.4.21` against `0.4.22`:
+- **Added canonical keys in `values/strings.xml`:** Exactly 10 keys (TMDB Personal API Key & In-App Updater channels).
+- **Removed keys:** 0.
+- **Modified existing keys:** 0 (All 2,249 existing strings retained identical canonical English content).
+- **Plurals:** Unchanged (3 plurals).
+- **New Total Canonical String Count:** 2,259 strings + 3 plurals (2,262 total resource entries).
+
+### 10.2 Added Keys & Translations
+All 10 newly added upstream keys were integrated across all three Chinese resource targets:
+
+| Resource Key | Canonical English (0.4.22) | Simplified Chinese (`values-zh` / `values-zh-rCN`) | Traditional Chinese (`values-zh-rTW`) |
+|---|---|---|---|
+| `settings_tmdb_api_key_label` | API key | **API 密钥** | **API 金鑰** |
+| `settings_tmdb_api_key_override_description` | Use your own TMDB API key, or leave blank to use the default. | **使用你自己的 TMDB API 密钥，留空则使用默认密钥。** | **使用你自己的 TMDB API 金鑰，留空則使用預設金鑰。** |
+| `settings_tmdb_personal_api_key` | Personal API key | **个人 API 密钥** | **個人 API 金鑰** |
+| `updates_channel_title` | Update channel | **更新渠道** | **更新頻道** |
+| `updates_channel_description` | Choose the type of app updates to receive | **选择要接收的应用更新类型** | **選擇要接收的應用程式更新類型** |
+| `updates_channel_stable` | Stable | **稳定版** | **穩定版** |
+| `updates_channel_beta` | Beta | **测试版** | **測試版** |
+| `updates_channel_stable_description` | Intended for everyday use. | **适合日常使用。** | **適合日常使用。** |
+| `updates_channel_beta_description` | Early updates that may contain bugs, break features, or behave unexpectedly. | **抢先获取更新，但可能包含错误、导致部分功能异常或出现意外行为。** | **搶先取得更新，但可能包含錯誤、導致部分功能異常或出現非預期行為。** |
+| `updates_waiting_for_stable` | You’ll receive the next stable release when it becomes available | **下一个稳定版发布后，你将收到更新** | **下一個穩定版發佈後，你將收到更新** |
+
+### 10.3 Integrity Validation (0.4.22)
+- **Canonical Default (`values/strings.xml`):** 2,259 strings, 3 plurals
+- **`values-zh/strings.xml`:** 2,259 strings, 3 plurals (Missing: 0, Extra: 0, Placeholder Mismatches: 0)
+- **`values-zh-rCN/strings.xml`:** 2,259 strings, 3 plurals (Missing: 0, Extra: 0, Placeholder Mismatches: 0)
+- **`values-zh-rTW/strings.xml`:** 2,259 strings, 3 plurals (Missing: 0, Extra: 0, Placeholder Mismatches: 0)
+- **Byte-Identical Verification:** `cmp values-zh/strings.xml values-zh-rCN/strings.xml` confirmed **100% Byte-Identical**.

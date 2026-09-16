@@ -1200,6 +1200,9 @@
     <string name="settings_playback_timeout_unlimited">无限制</string>
     <string name="settings_playback_tunneled_playback">通道播放</string>
     <string name="settings_playback_tunneled_playback_description">硬件层级音频/视频同步。可能改善部分 Android TV 设备上的播放。</string>
+    <string name="settings_tmdb_api_key_label">API 密钥</string>
+    <string name="settings_tmdb_api_key_override_description">使用你自己的 TMDB API 密钥，留空则使用默认密钥。</string>
+    <string name="settings_tmdb_personal_api_key">个人 API 密钥</string>
     <string name="settings_tmdb_enable_enrichment">启用 TMDB 元数据增强</string>
     <string name="settings_tmdb_enable_enrichment_description">使用 TMDB 作为元数据来源以丰富插件信息</string>
     <string name="settings_tmdb_language_code_label">语言代码</string>
@@ -2186,6 +2189,13 @@
     <string name="updates_empty_download_body">空白下载内容</string>
     <string name="updates_github_api_error">GitHub 发行版本 API 错误：%1$d</string>
     <string name="updates_no_channel_release">尚未发布任何更新。</string>
+    <string name="updates_channel_title">更新渠道</string>
+    <string name="updates_channel_description">选择要接收的应用更新类型</string>
+    <string name="updates_channel_stable">稳定版</string>
+    <string name="updates_channel_beta">测试版</string>
+    <string name="updates_channel_stable_description">适合日常使用。</string>
+    <string name="updates_channel_beta_description">抢先获取更新，但可能包含错误、导致部分功能异常或出现意外行为。</string>
+    <string name="updates_waiting_for_stable">下一个稳定版发布后，你将收到更新</string>
     <string name="updates_release_missing_title">发行版本没有标签或名称</string>
     <string name="cw_airs_date">%1$s 播出</string>
     <string name="cw_airs_today">今天播出</string>
