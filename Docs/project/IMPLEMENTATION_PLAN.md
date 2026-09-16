@@ -17,12 +17,12 @@
   - Git baseline verified against `upstream/cmp-rewrite`.
   - Architecture, player engine, storage, and build workflows completely audited without guessing.
   - Zero modifications to production source code.
-- **Phase 0 Closure Gate (Cloud Baseline Build):**
-  - Before starting Phase 1, commit and push Phase 0 audit documents to `develop/cn-emby`.
-  - Manually trigger `.github/workflows/ios-test-build.yml` via `workflow_dispatch` with `configuration = Debug`.
-  - The workflow must successfully complete and produce an unsigned IPA artifact.
-  - This proves: pure upstream baseline + fork configuration + GitHub Actions environment is operational.
-  - If this baseline build fails, resolve the CI/build issue before modifying any application source code.
+- **Phase 0 Closure Gate (Cloud Baseline Build Status):**
+  - **Initial Execution (Build Test IPA #2):** FAILED at `:composeApp:generateRuntimeConfigs` because GitHub forks do not inherit upstream `secrets.NUVIO_LOCAL_PROPERTIES_BASE64`, leaving `local.properties` absent for Gradle 9.4.1.
+  - **Remediation Applied:** Adjusted `.github/workflows/ios-test-build.yml` to always execute `Configure runtime properties`, writing an empty `local.properties` when the secret is absent. Zero application source code modified.
+  - **Current Gate State:** **PENDING RE-RUN (NOT YET PASSED)**.
+  - **Requirement:** User must trigger `Build Test IPA` (Debug) on GitHub Actions. The Phase 0 Gate will transition to PASSED only upon successful generation and upload of the unsigned IPA artifact.
+  - **Strict Gate Rule:** DO NOT enter Phase 1 until this baseline cloud build succeeds.
 - **Rollback Point:** `git checkout develop/cn-emby && git reset --hard 9bc77bc4`
 
 ---

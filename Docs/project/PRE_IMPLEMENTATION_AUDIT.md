@@ -58,10 +58,19 @@
   - Validates `arm64` architecture and `DownloadsWidgetExtension.appex`.
 - **Artifact Upload:** `actions/upload-artifact@v7`, retained for 7 days.
 - **Audit Assessment & Runner Clarification:**
-  - **REUSE EXISTING WORKFLOW.**
+  - **REUSE EXISTING WORKFLOW (with Fork Environment Compatibility Fix).**
   - **Runner Verdict:** In the current runtime environment, GitHub Hosted Runners officially support `macos-26`, and the `macos-26` runner image includes `Xcode 26.6`.
-  - **Policy:** **DO NOT** preemptively switch the runner to `macos-15`. Retain the upstream official workflow configuration.
-  - **Risk Classification:** **LOW / Operational Verification**. Modifications to the workflow are strictly prohibited unless the Phase 0 Cloud Baseline Build fails in actual execution.
+  - **Policy:** **DO NOT** switch the runner to `macos-15`. Retain the upstream official runner configuration.
+  - **Empirical CI Execution Audit (Build Test IPA #2):**
+    - `macos-26-arm64` runner scheduled and executed successfully.
+    - Apple toolchain verification (`xcodebuild -version`, `xcrun --sdk iphoneos`) succeeded with Xcode 26.6.
+    - `./scripts/prepare-ios-dependencies.sh` succeeded (MPVKit submodule and NuvioEngine.xcframework verified).
+    - DownloadsWidgetExtension Swift compilation succeeded.
+    - **Failure Point:** Build terminated at `:composeApp:generateRuntimeConfigs` because Gradle 9.4.1 declared `localPropertiesFile` as an InputFile that did not exist.
+    - **Root Cause:** Upstream workflow conditionally configured runtime properties via `if: env.RELEASE_PROPERTIES_BASE64 != ''`. Because GitHub forks do not inherit upstream repository secrets (`secrets.NUVIO_LOCAL_PROPERTIES_BASE64`), the step was skipped, leaving `local.properties` absent.
+    - **Failure Classification:** CI fork-environment compatibility issue (NOT an application business logic, MPVKit, or localization defect).
+    - **Fix Applied:** Modified `.github/workflows/ios-test-build.yml` to always run `Configure runtime properties`, creating an empty `local.properties` fallback if the secret is absent while maintaining full upstream behavior when the secret is present.
+  - **Risk Classification:** **LOW / Resolved CI Configuration**.
 
 ---
 
@@ -432,10 +441,15 @@ Before finalized profiles are enabled, the following formats must be empirically
 
 ---
 
-## 17. Phase 0 Closure Gate Requirement
+## 17. Phase 0 Closure Gate Status & Execution Record
 
-Before any code modification in Phase 1:
-1. Commit and push all Phase 0 audit documents to `develop/cn-emby`.
-2. Manually trigger existing GitHub Actions workflow `Build Test IPA` with `configuration = Debug`.
-3. Verify that the unsigned IPA artifact is successfully produced on `macos-26`.
-4. If the cloud build fails, resolve the baseline build issue first. **Do NOT proceed to Phase 1 until the baseline cloud build passes.**
+- **Initial Cloud Run Record (Build Test IPA #2):**
+  - Triggered via `workflow_dispatch` on `develop/cn-emby`.
+  - Confirmed operational: `macos-26-arm64` runner, Xcode 26.6, iPhoneOS SDK, MPVKit submodule, NuvioEngine framework.
+  - Halted at: `:composeApp:generateRuntimeConfigs` due to missing `local.properties` (fork secret inheritance constraint).
+  - Remediation: Updated `.github/workflows/ios-test-build.yml` with empty `local.properties` fallback.
+- **Current Gate Status:** **PENDING VERIFICATION RE-RUN**.
+  - Commit and push the workflow fix and Phase 0 audit documents to `develop/cn-emby`.
+  - Re-run `Build Test IPA` (`configuration = Debug`).
+  - The gate will strictly transition to PASSED only when an unsigned IPA Artifact is successfully generated in GitHub Actions.
+  - **Do NOT proceed to Phase 1 until the baseline cloud build passes.**
