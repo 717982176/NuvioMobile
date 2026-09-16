@@ -33,13 +33,14 @@
 
 ---
 
-## Phase 1: Simplified Chinese UI Localization & Terminology Normalization (READY)
+## Phase 1: Simplified Chinese UI Localization & Terminology Normalization (IMPLEMENTATION COMPLETED - PENDING INDEPENDENT REVIEW / CLOUD VERIFICATION)
+- **Status:** Implementation & Independent Audit Remediation Complete on branch `feat/zh-cn-ui`. All 2,249 strings + 3 plurals normalized, traditional characters eliminated, and integrity validated. Awaiting cloud IPA build verification.
 - **Files/Modules:**
   - `composeApp/src/commonMain/composeResources/values-zh/strings.xml` (Simplified Chinese fallback)
   - `composeApp/src/commonMain/composeResources/values-zh-rCN/strings.xml` (Mainland Simplified Chinese)
   - `composeApp/src/commonMain/composeResources/values-zh-rTW/strings.xml` (Traditional Chinese)
-  - `composeApp/src/androidMain/res/xml/locale_config.xml` (Register `zh`, `zh-CN`, `zh-TW`)
-  - `composeApp/src/commonMain/kotlin/com/nuvio/app/features/settings/AppLanguage.kt` (Register `CHINESE_SIMPLIFIED` & `CHINESE_TRADITIONAL`)
+  - `composeApp/src/androidMain/res/xml/locale_config.xml` (Registered `zh`, `zh-CN`, `zh-TW`)
+  - `composeApp/src/commonMain/kotlin/com/nuvio/app/features/settings/AppLanguage.kt` (Registered `CHINESE_SIMPLIFIED` & `CHINESE_TRADITIONAL`)
 - **Locale Strategy:**
   - `values-zh` = Simplified Chinese default fallback (prevents generic `zh` defaulting to Traditional).
   - `values-zh-rCN` = Mainland China Simplified Chinese.
